@@ -63,3 +63,12 @@
 #   files/ple_layer_patched.py, files/modelopt_patched.py,
 #   files/mtp_patched.py,
 #   files/ple_offload/*.py    generated from the .orig copies on every launch
+
+# --- fork: the running configuration on spark-bharat --------------------
+# This fork exists to capture the config that is actually serving, which
+# upstream deliberately leaves untracked. Both files are scrubbed: the
+# launch script carries ${HF_TOKEN}, never a literal token, and /.env
+# keeps HF_TOKEN commented out. Never commit a real hf_ token here.
+!/.env
+!/.last_launch.sh
+!/RUNNING.md
