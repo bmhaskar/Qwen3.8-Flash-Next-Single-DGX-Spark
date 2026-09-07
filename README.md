@@ -57,10 +57,23 @@ because they cost time to rediscover.
 - **~18 minutes to healthy**, against the 10–12 min the quick-start budgets and the
   10 min 51 s in the table.
 - **Decode is strongly workload-dependent, so a single tok/s figure misleads.**
-  Measured at temp 0: **42.0–44.6 tok/s on code** (draft acceptance 82–88%, mean
-  accept length 3.47–3.66), 37.1 on factual (~60%, 2.79), and 26–30 on prose at
-  temp 0.7 (37–42%, 2.12–2.25). A low prose reading is not a regression — check
-  what the workload was before chasing it.
+  Single stream, idle server, acceptance read from vLLM's own `spec_decode`
+  counters as a delta around each request:
+
+  | workload | decode | draft acceptance | mean accept length |
+  |---|---|---|---|
+  | code @ temp 0 | **50.1–52.7 tok/s** | 88.6–91.7% | 3.66–3.75 |
+  | prose @ temp 0.7 | 30.9 tok/s | 41.1% | 2.23 |
+
+  An earlier pass on this same container measured 42.0–44.6 tok/s on code
+  (82–88%, 3.47–3.66) and 26–30 on prose. Nothing was relaunched between the
+  two — same flags, same process — so the difference is the prompts, not the
+  configuration: the later code prompts are idiomatic Python, which is the
+  friendliest case a speculative drafter gets. **That is the point of the table.**
+  Decode here tracks draft acceptance almost linearly, and acceptance is a
+  property of the workload. A low prose reading is not a regression, and a high
+  code reading is not a win — check what the workload was before concluding
+  either.
 - **`--default-chat-template-kwargs '{"enable_thinking":false}'` is required** by
   the client here, which sends no `chat_template_kwargs`. With it, requests return
   `reasoning_tokens: 0` and `finish_reason: stop`; `enable_thinking: true` still

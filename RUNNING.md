@@ -29,12 +29,17 @@ unless noted:
 
 | workload | decode | draft acceptance | mean accept length |
 |---|---|---|---|
-| code | **42.0 – 44.6 tok/s** | 82 – 88% | 3.47 – 3.66 |
-| factual | 37.1 tok/s | ~60% | 2.79 |
-| prose (temp 0.7) | 26 – 30 tok/s | 37 – 42% | 2.12 – 2.25 |
+| code | **50.1 – 52.7 tok/s** | 88.6 – 91.7% | 3.66 – 3.75 |
+| prose (temp 0.7) | 30.9 tok/s | 41.1% | 2.23 |
 
-The client here is coding/agentic, so **42 – 44.6 tok/s is the number that matters**.
-Do not read a low prose figure as a regression.
+Earlier on this same container: 42.0 – 44.6 tok/s on code (82 – 88%, 3.47 – 3.66),
+37.1 factual (~60%, 2.79), 26 – 30 prose (37 – 42%, 2.12 – 2.25). Nothing was
+relaunched between the passes, so the gap is the prompts, not the configuration.
+
+The client here is coding/agentic, so **the code row is the number that matters**.
+Decode tracks draft acceptance almost linearly and acceptance is a property of the
+workload: do not read a low prose figure as a regression, or a high code figure as
+a win.
 
 ## Launch with `.last_launch.sh`, not `./start.sh`
 

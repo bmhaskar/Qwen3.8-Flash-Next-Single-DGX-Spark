@@ -72,3 +72,6 @@
 !/.env
 !/.last_launch.sh
 !/RUNNING.md
+# corpus generation for the reduced draft vocabulary: the corpus itself is
+# hundreds of MiB of model output, the vocab is a generated artifact.
+draft_vocab_build/
