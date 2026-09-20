@@ -18,8 +18,8 @@ known-good server. This fork re-includes them, scrubbed.
 | checkpoint | `Mia-AiLab/Qwen3.8-Flash-Next-NVFP4` |
 | served as | `qwen3.8-flash-next` |
 | port | **8888** (kept so the pi client's config is unchanged) |
-| launched | 2026-09-07 22:27:38 UTC, healthy after **~18 min** |
-| KV pool | **389,398 tokens** — 1.49x a 262,144-token request |
+| launched | 2026-09-20 17:39 UTC, healthy after **1176s (19.6 min)** |
+| KV pool | **427,631 tokens** — 1.63x a 262,144-token request |
 | max model len | 262,144 |
 
 ## Decode is workload-dependent
@@ -29,8 +29,16 @@ unless noted:
 
 | workload | decode | draft acceptance | mean accept length |
 |---|---|---|---|
-| code | **50.1 – 52.7 tok/s** | 88.6 – 91.7% | 3.66 – 3.75 |
+| code (bench/ab-code.py, warm) | **53.5 tok/s** mean, 57.0 median | 65.5% | 1.97 |
+| code (before MAMBA_SSM_CACHE_DTYPE=bfloat16) | 51.0 tok/s | 63.5% | 1.91 |
 | prose (temp 0.7) | 30.9 tok/s | 41.1% | 2.23 |
+
+The code rows come from `bench/ab-code.py`, five frozen prompts at temp 0 — a fixed
+fixture, so arms are comparable across boots. The acceptance figures there are a
+`/metrics` delta over the whole run and are NOT comparable to the older ad-hoc
+88.6–91.7% numbers, which were single-request readings on different prompts.
+**Discard the first run after a boot**: warm-up cost the first two prompts 860 ms and
+2,780 ms TTFT against ~460 warm.
 
 Earlier on this same container: 42.0 – 44.6 tok/s on code (82 – 88%, 3.47 – 3.66),
 37.1 factual (~60%, 2.79), 26 – 30 prose (37 – 42%, 2.12 – 2.25). Nothing was
