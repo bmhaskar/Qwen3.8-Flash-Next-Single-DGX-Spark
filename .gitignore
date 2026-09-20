@@ -128,3 +128,11 @@
 # corpus generation for the reduced draft vocabulary: the corpus itself is
 # hundreds of MiB of model output, the vocab is a generated artifact.
 draft_vocab_build/
+
+# --- fork: the A/B fixture and its results ------------------------------
+# bench/ab-code.py is the frozen-prompt fixture every knob decision on this
+# box is argued from, and the jsonl is the record of what each arm measured.
+# Both are useless separately: changing the prompts invalidates the history.
+!/bench/ab-code.py
+!/logs/
+!/logs/ab-code.jsonl
