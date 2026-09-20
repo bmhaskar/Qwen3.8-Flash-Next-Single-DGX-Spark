@@ -102,3 +102,57 @@ warning. On 2026-09-07 a `stop.sh` was killed mid-flight by a broken pipe *after
 archived a still-running container's log but *before* its `docker rm -f` — one step
 from force-removing a healthy server and paying the ~20-minute reboot above. A
 20-minute model boot should never be hostage to the SSH link.
+
+## Supervision (installed 2026-09-20)
+
+Upstream's 24/7 supervisor (#41), installed as USER units with the paths pointed at
+this checkout instead of the README's `~/qwen38-flash-next`:
+
+| unit | state | |
+|---|---|---|
+| `qwen38-flash-supervisor.service` | **enabled, running** | the state machine: keeps the container and memwatch up, probes /health once a minute, 5 failures -> emergency stop + relaunch, 3 emergencies in 2 h -> breaker OPEN |
+| `qwen38-flash-heartbeat.timer` | **enabled** | daily 09:00, unconditional |
+| `qwen38-flash-heartbeat.service` | **fork-local, see below** | |
+| `qwen38-flash-maintenance.timer` | **installed, DELIBERATELY NOT ENABLED** | see below |
+| `qwen38-flash-supervisor-failure@.service` | installed | `OnFailure=` alert hook |
+
+`loginctl enable-linger bharat` is on, so these start at boot with no login. The
+supervisor adopted the running container rather than restarting it (`adopt_since` in
+`logs/supervisor.state`, container `StartedAt` unchanged, `RestartCount=0`).
+
+### Fork-local fix: the heartbeat timer had no service
+
+Upstream ships `qwen38-flash-heartbeat.timer` with no `Unit=` and **no
+`qwen38-flash-heartbeat.service`**, so the README's install line creates a timer that
+fires into a unit that does not exist. That is the worst unit to lose silently — the
+heartbeat exists precisely so that silence cannot be read as health. Added as
+`systemd/qwen38-flash-heartbeat.service`, running `scripts/heartbeat.sh`. Verified:
+`Result=success`, and it emits a real payload.
+
+### The weekly maintenance relaunch is NOT enabled, on purpose
+
+`maintenance-relaunch.sh` is `stop.sh -> start.sh -> smoke-test.sh` with **no memory
+reclaim between them**. On a GB10 that cannot work unattended. Measured on this box
+today, 2026-09-20: after a graceful `./stop.sh` of the ~96 GB container, MemFree was
+**11 GiB**; only `fmem` — which reloads the NVIDIA kernel modules and needs root *and*
+gdm stopped — brought it to **118 GiB**. vLLM gates its launch on free *physical*
+memory, so the relaunch half of that window would fail.
+
+Enabling the timer would therefore convert a healthy server into a Sunday-04:00 outage
+that no automation on this box can end. Left installed so it is one `systemctl --user
+enable` away if the reclaim problem is ever solved.
+
+**The same limit applies to the supervisor's own crash recovery.** After any real
+container death the leaked memory is stranded, so its relaunch attempts will fail and
+it will alert rather than recover — 3 failures and the breaker opens. What it genuinely
+delivers here:
+
+- **autostart at boot** — the one gap we actually had. A reboot clears the leak, so the
+  boot path is the case where its relaunch *does* work.
+- detection, health probing and alerting, memwatch keepalive, shm cleanup, log rotation.
+
+### Alerts are not yet wired
+
+`ALERT_WEBHOOK` is unset in `.env`, so `alert.sh` logs to `logs/alert.log` and sends
+nothing — silent-safe, but it means the supervisor can currently detect a failure and
+tell no one. Set it to an ntfy topic (`https://ntfy.sh/<topic>`) to close that.

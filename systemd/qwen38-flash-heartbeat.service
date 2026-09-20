@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Fork-local, not from upstream.
+#
+# The repo ships qwen38-flash-heartbeat.timer but no matching service. A timer
+# with no Unit= activates <same-name>.service, which does not exist, so the
+# README's `systemctl --user enable --now qwen38-flash-heartbeat.timer` installs
+# a timer that fires into nothing — and the heartbeat exists precisely so that
+# silence cannot be mistaken for health, which makes a silently dead heartbeat
+# the worst possible failure of this unit.
+#
+# scripts/heartbeat.sh is the payload the timer's own comment describes.
+[Unit]
+Description=Heartbeat for Qwen3.8-Flash-Next (uptime, restarts, MemAvailable, disk)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Projects/qwen3.8-flash-next-spark
+ExecStart=%h/Projects/qwen3.8-flash-next-spark/scripts/heartbeat.sh

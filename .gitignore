@@ -136,3 +136,6 @@ draft_vocab_build/
 !/bench/ab-code.py
 !/logs/
 !/logs/ab-code.jsonl
+
+# --- fork: the heartbeat service upstream omits -------------------------
+!/systemd/qwen38-flash-heartbeat.service
