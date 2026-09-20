@@ -105,7 +105,7 @@ model: text, images and video all work out of the box (see below). Nothing here 
 
 ```
 cp .env.sample .env        # edit IMAGE / HF_TOKEN if needed
-./download.sh              # fetch the ~99 GiB checkpoint (resumable)
+./download.sh              # fetch the ~99 GiB checkpoint (resumable, sha256-verified)
 ./start.sh                 # ~10-12 min to /health; serves on :8888
 ./stop.sh                  # container + watchdog, graceful
 ```
@@ -120,12 +120,21 @@ command without running anything. `./stop.sh` sends SIGTERM and waits up to
 the container runs with `--ipc host`, so segments it leaves behind leak onto
 the host's `/dev/shm` until reboot. `./stop.sh --force` skips the wait.
 
+**Migration — the API binds to every interface again.** The API briefly
+defaulted to loopback (`127.0.0.1`); it now binds `0.0.0.0` by default
+(`BIND`) as it originally did. With no `API_KEY` / `--api-key` set, `start.sh`
+prints a WARN listing the exposed interfaces — anything that can reach the
+port can reach the model, so serve with a key or set `BIND=127.0.0.1` in
+`.env` and reach the box through an ssh tunnel.
+
 ## Measured profile
 
 `.env.sample` ships **262,144 context (YaRN off), MTP 3, `HOST_RESERVE_GIB=26`,
 `KV_TARGET_GIB=20`, `KV_CACHE_DTYPE=fp8`, `MAMBA_SSM_CACHE_DTYPE=bfloat16`,
 `MAX_NUM_SEQS=4`, `MAX_NUM_BATCHED_TOKENS=2048`**, with the V2 model runner
-pinned through `EXTRA_DOCKER_ARGS`.
+pinned through `EXTRA_DOCKER_ARGS`. For Spanish traffic, also swap the draft
+vocabulary: `MTP_DRAFT_VOCAB=files/draft_vocab_es_en_code_65k.txt`
+(see [Serving Spanish](#serving-spanish-65k-draft-vocab)).
 Everything below was measured on this host on 2026-09-04; each row names the
 configuration it came from, because the numbers move a lot between them.
 Decode numbers are not in this table: they predate the 2026-09-05 optimisation
@@ -218,6 +227,24 @@ every stream count, FULL graphs throughout). K=3 wins at every concurrency,
 K=2 ties it, K=1 loses 8–14% and K=0 loses 32–46%. There is no crossover, so
 `MTP_K_SCHEDULE` has nothing to schedule. The full table is in the CHANGELOG.
 
+#### 2026-09-11: structured (counting-stream) decode at MAX_NUM_SEQS=8
+
+Same launch config as the 2026-09-06 row except `HOST_RESERVE_GIB=28` (at 26
+the 8-width graph-capture spike trips the watchdog on this host — see
+`.env.sample` under `MAX_NUM_SEQS`), measured with `bench/structured.py`:
+a counting-style predictable stream, 400 completion tokens, temperature 0,
+thinking off — the workload shape sparkDash's "structured" prompt type uses.
+**Not comparable to the prose tables above**: near-deterministic continuation
+is MTP's best case, so these read ~35% higher single-stream. They exist so
+structured-prompt numbers published elsewhere can be compared like-for-like.
+
+| streams | aggregate | per stream | TTFT |
+|---|---|---|---|
+| 1 | **65.2 tok/s** | 67.7 tok/s | ~230 ms |
+| 2 | **116.2 tok/s** | 60.7 tok/s | ~290 ms |
+| 4 | **205.9 tok/s** | 53.9 tok/s | ~315 ms |
+| 8 | **313.6 tok/s** | 42.8 tok/s | ~370–1,190 ms |
+
 **Decode under a concurrent prefill** is the one place the shipped chunk width
 hurts. With two streams decoding and one 64k prompt arriving, the gap between
 their streamed chunks for the 34.5 s of that prefill is p50 1,057 ms /
@@ -288,7 +315,7 @@ language, English 94.8% vs 93.6% and Chinese 86.4% vs 86.4%. See the CHANGELOG
 entry for the full method.
 
 That win now ships as the default: `.env.sample` sets `MTP_DRAFT_VOCAB` to the
-checked-in `files/draft_vocab_en_code_47k.txt` (47,149 ids, code-tuned, 99.58%
+checked-in `files/draft_vocab_en_code_47k.txt` (47,172 ids, code-tuned, 99.58%
 held-out coverage on host code+docs), and `start.sh` resolves relative paths
 against the repo and warns when MTP runs with the full head. Empty the knob to
 restore full-vocabulary drafting. One honest caveat: the shipped file was built
@@ -390,6 +417,37 @@ under PIECEWISE CUDA graphs with the full 248,320-token draft vocabulary. They
 are superseded in both directions: acceptance is much higher, and ordinary
 prose now measures 48.7 tok/s single-stream.
 
+
+### Serving Spanish: 65k draft vocab
+
+`MTP_DRAFT_VOCAB=files/draft_vocab_es_en_code_65k.txt` extends the shipped
+47k English+code draft vocabulary to **65,536 rows** — the 47k file whole as
+a floor (verified: 0 of the 47,172 ids missing) plus 668 MiB of Spanish
+Wikipedia at natural frequencies, byte-fallback range pinned. It costs 9% of
+the draft-head byte saving (0.31 vs 0.22 GiB lm_head, still 2.61 GiB/step
+under MTP 3) and exists for one reason: **the 47k file covers only 64.4% of
+Spanish output occurrences**, so Spanish drafting runs at ~0.9–1.0 accepted
+tokens/draft where English prose runs ~1.8 (per-position 0.80/0.59/0.41). Correctness is identical either way —
+rejection sampling rejects drafts outside the subset, never wrong output —
+poor coverage only costs speed.
+
+Measured on the contributor's host with an interleaved ABBA protocol
+(five prompts per language, drift-cancelling): **Spanish 32.6 → 41.9 tok/s
+(+28.6%), acceptance 0.94 → 1.56, English unchanged.** Re-verified here on
+2026-09-14 against the live server after the merge: acceptance 1.53
+accepted/draft aggregate (11,958/7,819 since relaunch) against the 0.94
+baseline measured on the 47k file, English structured decode unchanged (67.9 / 114.4 tok/s at C1/C2
+against the 65.2 / 116.2 reference), and the Spanish quality gate
+(`bench/audit-spanish.py`: ~14k tokens across long-form essays, narrative,
+Spanish-docstring code, JSON and a five-turn conversation) passes with **zero
+replacement characters and zero dialect-drift markers**. The full method and
+the two further findings it surfaced (per-mode sampling parameters and
+benchmark-family comparability) are in
+`docs/spanish-drafting-and-performance-2026-09-13.md`.
+
+Use it when a meaningful share of your traffic is Spanish; otherwise stay on
+the shipped 47k and keep the extra byte saving. Both files are built by
+`files/build_draft_vocab.py` / `files/build_draft_vocab_extend.py`.
 
 ## Multimodal (images and video)
 
@@ -559,12 +617,106 @@ access — this paragraph is a summary, and the repo's own terms are what bind.
 
 Safety refusals are removed in this checkpoint, which moves the guardrails onto
 you: filtering, human review and access control are yours to supply. That
-matters more here than on stock, because `start.sh` binds the server to
-`0.0.0.0` — anything that can reach the port can reach an unfiltered model.
+matters more here than on stock, because the shipped default serves the
+network (`BIND=0.0.0.0`): without an `--api-key` — which `start.sh` warns
+about — anything that can reach the port can reach an unfiltered model.
 
 The abliteration splice is by **Keys (drowzeys)**, built on MiaAI Lab's
 single-Spark NVFP4 recipe over Qwen/Alibaba's Qwen3.8-Flash-Next. See the
 checkpoint's `CREDITS.md`, and [Credits](#credits) below.
+
+### NVIDIA's official checkpoint (`TP1_MODEL_ID`)
+
+This is optional. The stock Mia checkpoint stays the default, and nothing
+changes unless you set `TP1_MODEL_ID`. To serve
+[`nvidia/Qwen3.8-Flash-Next-NVFP4`](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4)
+instead, download it:
+
+```bash
+./download.sh nvidia/Qwen3.8-Flash-Next-NVFP4
+```
+
+then set these three lines in `.env` and run `./start.sh`:
+
+```bash
+TP1_MODEL_ID=nvidia/Qwen3.8-Flash-Next-NVFP4
+PLE_GIB=47.68
+HOST_RESERVE_GIB=30
+```
+
+Without `PLE_GIB=47.68` the budget check counts the PLE table as GPU weights
+and refuses to boot. Without `HOST_RESERVE_GIB=30` the CUDA-graph capture at
+startup runs past the memory budget. If you turn MTP off
+(`MTP_NUM_SPECULATIVE_TOKENS=0`), also set `MTP_WEIGHTS_GIB=2.34`.
+`.env.sample` explains all of them.
+
+**Trade-offs against the default checkpoint**, measured on one DGX Spark:
+
+| | default (Mia) | NVIDIA |
+|---|---|---|
+| weights on the GPU | 71.8 GiB | 75.9 GiB |
+| PLE table in host memory | 26.8 GiB | 47.7 GiB |
+| disk (checkpoint + packed PLE table) | ~99 + 27 GiB | ~124 + 48 GiB |
+| `HOST_RESERVE_GIB` it needs | 26 (the default) | 30 |
+| KV pool at that reserve | ~975K tokens | ~545K-570K tokens |
+
+At `HOST_RESERVE_GIB=26` the NVIDIA checkpoint peaked at 101.1 GiB of driver
+memory against a 95.65 GiB budget during graph capture, with 12
+`NV_ERR_NO_MEMORY` in the kernel log. At 30 it peaked at 90.0 GiB with none.
+30 also covers `MAX_NUM_SEQS=8` (measured).
+
+Decode speed has not been measured against the default on equal settings.
+NVIDIA keeps attention and the shared experts in BF16, so each token moves
+more bytes, and decode is expected to be slower. Output quality has not been
+compared here either; NVIDIA's model card has its own accuracy numbers. Use
+this checkpoint when you want NVIDIA's own quantization. For one Spark, the
+default checkpoint is the better fit.
+
+The checkpoint is NVIDIA's own Model Optimizer
+(v0.46.0) quantization of the same upstream `Qwen/Qwen3.8-Flash-Next`, not a
+community re-quant: mixed precision (MSE-calibrated NVFP4 on routed MoE
+experts, BF16 kept on attention/shared-experts, FP8 MTP), 124 GiB rather than
+the stock 99 GiB. Weights are unmodified NVIDIA output — this is a serving
+compatibility layer, not a re-quantization or a merge of the two checkpoints.
+
+It needed two fixes beyond pointing `TP1_MODEL_ID` at it, both because its
+internal layout differs from the stock checkpoint this recipe was built
+against:
+
+- **PLE table format.** Stock's n-gram table is NVFP4-coded (`U8` 4-bit codes
+  + a per-shard `F8_E4M3` scale). NVIDIA's is plain per-tensor `F8_E4M3`
+  bytes with a single global `BF16` scale — verified against the checkpoint's
+  own tensors (`shard_N.weight` dtype, no per-shard `weight_scale`).
+  `build_ple_packed_table.py` now branches on the shard dtype; the packed
+  table this produces is 47.68 GiB (not the stock 26.82 GiB — set `PLE_GIB`
+  accordingly, see `.env.sample`). `tests/test_nvidia_ple.py` covers both
+  builder paths plus a byte-exact sample check against the real downloaded
+  checkpoint.
+- **MTP MoE quantization.** NVIDIA's `hf_quant_config.json` declares the MTP
+  draft model's routed experts under their own local layer index
+  (`mtp.layers.0.mlp.experts`, `quant_algo: FP8_BLOCK_SCALES`, `group_size:
+  128`), but `mtp.py`'s `remap_weight_names()` mounts those tensors at the
+  model's global layer index (`mtp.layers.48...`, after the main model's own
+  layers) without renumbering the quantization declaration to match, so it's
+  never found. ModelOpt's config parsing also normalizes that declared
+  algorithm to its own internal name, `FP8_PB_WO` (128x128 block-scaled FP8 —
+  same layout `ModelOptFp8PbWoLinearMethod` already handles for Linear
+  layers, confirmed against this checkpoint's tensors: `down_proj` weight
+  `[2560, 640]` F8_E4M3, `weight_scale_inv` `[20, 5]` BF16), for which
+  `get_quant_method` had no `RoutedExperts` branch at all. `patch_modelopt_mxfp8.py`
+  now bridges the local/global index (MTP always has exactly one local
+  layer) and routes `FP8_PB_WO` MoE experts to vLLM's native (non-ModelOpt)
+  `Fp8MoEMethod`/`Fp8Config`, the same block-scaled implementation DeepSeek-V3
+  checkpoints use. `tests/test_nvidia_mtp.py` covers the index bridging.
+
+Verified on a single DGX Spark (GB10, 121 GiB): clean boot at the shipped
+profile (262144 context, MTP 3, FP8 KV, `CUDAGRAPH_MODE=FULL_DECODE_ONLY`),
+correct Korean generation and `tool_calls` output, ~25 tok/s end-to-end
+(prefill included) on a short single-stream request versus ~18 tok/s with MTP
+off on the same host. That is a spot check, not a sparkDash sweep — the
+prefill/decode tables above are stock-checkpoint numbers and do not apply
+here; NVIDIA's own model card has the accuracy comparison against `Qwen3.8-27B`
+and other baselines.
 
 ### Reasoning is on by default
 
@@ -754,6 +906,117 @@ bound (1.4 MiB/token at ~26 tok/s, the rate at the time, is only ~36 MB/s). The 
 ~2 GiB of unified memory no longer wasted on readahead that is thrown away,
 which is what funds the KV pool `KV_TARGET_GIB` asks for.
 
+## Unattended operation
+
+The repo ships a supervisor that closes the detect → stop → recover loop the
+base launcher leaves open: the container has **no docker `--restart`**
+(deliberately — a docker-restarted container comes back *unwatched*, with
+memwatch dead and stale shm). `scripts/supervise.sh` is the single state
+machine: it keeps the container up, keeps memwatch up, health-probes once a
+minute (5 consecutive failures → emergency stop → relaunch with backoff), and
+holds a circuit breaker (3 emergencies in 2 h → OPEN, alert-only until a human
+re-arms). Its state survives in `logs/supervisor.state`; the breaker resets on
+host reboot.
+
+Install (all USER units, exact commands):
+
+```
+mkdir -p ~/.config/systemd/user
+cp systemd/qwen38-flash-supervisor.service \
+   systemd/qwen38-flash-maintenance.service \
+   systemd/qwen38-flash-maintenance.timer \
+   systemd/qwen38-flash-heartbeat.timer \
+   "systemd/qwen38-flash-supervisor-failure@.service" \
+   ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now qwen38-flash-supervisor
+systemctl --user enable --now qwen38-flash-maintenance.timer
+systemctl --user enable --now qwen38-flash-heartbeat.timer
+loginctl enable-linger "$USER"     # user units start at boot without a login
+```
+
+The units assume the checkout lives at `~/qwen38-flash-next` (the `%h`
+expansion). If it does not, adjust the `WorkingDirectory=` and `ExecStart=`
+paths in the copied files to your checkout. `systemd-analyze verify` reports
+"not executable / No such file or directory" solely because of that path
+mismatch before editing; the unit files themselves are valid.
+
+What you get:
+
+- **`qwen38-flash-supervisor.service`** — the loop, `Restart=on-failure` (safe:
+  the breaker state lives in the state file, not in systemd). `OnFailure=`
+  fires `alert.sh`.
+- **`qwen38-flash-maintenance.timer`** — weekly graceful relaunch (Sun 04:00):
+  drains in-flight requests via `vllm:num_requests_running` (up to
+  `MAINT_DRAIN_S`, default 600 s), restarts, `smoke-test.sh`, then releases the
+  `logs/stopping` handshake flag. The slow per-request memory growth (2–3 GiB,
+  never returned) is the reason: it converts a known maintenance item into an
+  unscheduled outage otherwise.
+- **`qwen38-flash-heartbeat.timer`** — daily unconditional heartbeat: uptime,
+  restart count, `MemAvailable`, disk free. Unconditional on purpose: silence
+  reads as "running".
+- **`alert.sh`** — generic webhook (`ALERT_WEBHOOK` in `.env`; payload
+  `{hostname,timestamp,message,container,mem_available}`; identical messages
+  collapse to one per 15 min). Example URLs: ntfy (`https://ntfy.sh/<topic>`)
+  or a telegram-bridge webhook. No-op with a WARN when unset — out-of-the-box
+  stays silent-safe. A deliberately failing alert proves the path works:
+  `ALERT_WEBHOOK=http://127.0.0.1:1 ./scripts/alert.sh test`.
+- The supervisor warns at most once/hour if `comfy-h3.service` is active
+  (it steals the API port), cleans leaked `/dev/shm` segments between cycles
+  (only when no vLLM/sglang container runs), and rotates the memwatch log
+  (copy-truncate at 10 MB) plus prunes `logs/archive/` to the newest 20 sets.
+
+Host steps (documented, not automated — no sudo in-repo):
+
+- `loginctl enable-linger <user>` (above).
+- Verify docker is enabled: `systemctl is-enabled docker`.
+- `sudo systemctl disable --now comfy-h3.service` — a reboot with it enabled
+  means the server cannot take its port.
+- Disable unattended-upgrades' automatic reboot: remove
+  `Unattended-Upgrade::Automatic-Reboot` from `/etc/apt/apt.conf.d/50unattended-upgrades`
+  (an auto-reboot at 02:00 with no linger = down until morning). Pin the NVIDIA
+  driver so a bump under a running server is not a forced outage.
+- NTP on: `timedatectl set-ntp true` (log correlation across
+  memwatch/journal/archives is worthless without synced clocks).
+
+**Maintenance / stop handshake:** `stop.sh` and the maintenance wrapper signal
+the supervisor through a flag file (`logs/stopping`). While that file exists
+the supervisor waits instead of relaunching (a crash between stop and healthy
+leaves the flag in place — correct: the human gets the alert, and the next
+supervisor tick adopts whatever is running). The flag does not pin the box
+down forever: a reboot clears it, and the supervisor reclaims a flag older
+than `STOPPING_MAX_AGE_S` (default 2 h, far longer than any maintenance
+window) with an alert, so an abandoned maintenance cannot turn into a
+permanent outage. Manual stops for real maintenance: `./stop.sh` then `touch
+logs/stopping` (or run `maintenance-relaunch.sh` directly, which does the
+whole window).
+
+**Important:** the supervisor treats a >2 h old flag (or any flag after a
+reboot) as abandoned and **auto-relaunches**. For planned downtime approaching
+2 h, or any maintenance that includes a reboot, stop the supervisor unit
+itself so it cannot act on your behalf:
+
+```
+systemctl --user stop qwen38-flash-supervisor
+# … maintenance …
+systemctl --user start qwen38-flash-supervisor
+```
+
+(The maintenance and heartbeat timers are harmless while the supervisor is
+stopped — the maintenance wrapper would fail its smoke test into an alert, so
+stop `qwen38-flash-maintenance.timer` too if the machine will be off across a
+Sunday 04:00.)
+
+**Re-arming the breaker:** the circuit breaker is file-backed
+(`logs/supervisor.state`). To re-arm after a genuine human fix:
+`rm -f logs/stopping logs/supervisor.state` — or reboot the host
+(`BREAKER_RESET_ON_BOOT=1` default: a reboot is a human's hand on the box, and
+it also clears a stale `logs/stopping`).
+
+**Alert negative-test:** set `ALERT_WEBHOOK` to an unroutable URL once and
+confirm the failure is visible in `logs/alert.log` — that is the intended way
+to prove the path works.
+
 ## Safety rules
 
 Each of these cost a hard host hang or a dead server during bring-up.
@@ -862,10 +1125,29 @@ with `--ipc host`. vLLM does not honour SIGTERM while still loading weights;
 a stop in that phase ends in the SIGKILL. `start.sh` archives the previous
 container and watchdog logs the same way before it relaunches.
 
+Two 2026-09-09 additions tie the watchdog into the supervisor loop:
+
+- **Emergency marker + alert.** The emergency stop path now writes
+  `WATCHDOG EMERGENCY STOP <reason>` as its last log line and calls
+  `scripts/alert.sh` (a no-op when `ALERT_WEBHOOK` is unset). Clean
+  `stop.sh` paths produce neither, so the supervisor can tell an emergency
+  from a human stop. Memwatch never restarts the container — the supervisor
+  owns relaunches.
+- **`LEAK TREND` line.** Over the first 10 minutes it records the `driver`
+  figure as a baseline; once the run's `driver` has grown 4 GiB above it
+  (`MEMWATCH_TREND_GIB`), it logs a `LEAK TREND` line once per day. This is
+  the documented 2–3 GiB per-request growth the CUDA caching allocator never
+  returns showing up as a trend; the response is the scheduled maintenance
+  relaunch, not a new alarm.
+- Memwatch log rotation is copy-truncate (safe with the fd memwatch keeps
+  open): `scripts/memwatch-rotate.sh` copies past-10 MB and truncates, and
+  prunes `logs/archive/` to the newest 20 sets.
+
 ## Sanity test
 
 ```
-curl -s localhost:8888/v1/chat/completions -H 'Content-Type: application/json' -d '{
+curl -s localhost:8888/v1/chat/completions -H 'Content-Type: application/json' \
+  ${API_KEY:+-H "Authorization: Bearer $API_KEY"} -d '{
  "model":"qwen3.8-flash-next","temperature":0,"max_tokens":400,
  "messages":[{"role":"user","content":"In one sentence, what is a DGX Spark?"}]}' \
  | python3 -c "
@@ -879,20 +1161,38 @@ This build emits reasoning **before** the answer, in a `reasoning` field rather
 than `content`. Budget at least ~400 `max_tokens`: at 200 the reply is still
 inside its reasoning, so `content` comes back empty on a perfectly healthy
 server. Gibberish in either field means the PLE path has regressed (bf16 IPC
-buffer or missing quant scales) — see the patch notes below.
+buffer or missing quant scales) — see the patch notes below. If `--api-key` is
+set (the shipped default), set `API_KEY` in the shell first or the call 401s;
+`scripts/smoke-test.sh` and the bench scripts read it from `.env` themselves.
 
 ## Layout
 
 - `download.sh` — fetches the checkpoint into the Hugging Face cache
-  (resumable; honours `HF_TOKEN` for gated repos). `ABLIT=1` downloads the
-  full Keys ablit snapshot after you accept the Hugging Face terms. Uses the
-  host's `huggingface_hub` if present, otherwise the container image.
+  (resumable; honours `HF_TOKEN` for gated repos; sha256-verifies every LFS
+  blob against the paginated HF tree manifest unless `VERIFY_SHA256=0`).
+  `ABLIT=1` downloads the full Keys ablit snapshot after you accept the Hugging
+  Face terms. Uses the host's `huggingface_hub` if present, otherwise the
+  container image.
 - `start.sh` — launcher: derives the GPU budget from live memory under the
   `HOST_RESERVE_GIB` cap, builds the packed PLE table on first run,
   regenerates the patched vLLM files, archives the previous run's logs, starts
-  the container and `files/memwatch.sh`.
+  the container and `files/memwatch.sh`, waits for `/health` with a heartbeat
+  and a `READY_TIMEOUT_S` deadline.
 - `stop.sh` — stops the watchdog, then the container (gracefully by default);
   reports leftover `/dev/shm` segments without deleting them.
+- `scripts/smoke-test.sh` — per-launch verification: health, model metadata,
+  coherent generation, temperature-0 determinism (WARN-only), decode speed
+  (≥15 tok/s), a tool-call round-trip (settles `qwen3_coder` vs `qwen3_xml`),
+  and `/metrics`.
+- `scripts/supervise.sh` + `systemd/qwen38-flash-*.service/timer` — the 24/7
+  supervisor, weekly maintenance relaunch, daily heartbeat, and `OnFailure=`
+  alert target (see [Unattended operation](#unattended-operation)).
+- `scripts/health-probe.sh` — stateless single-shot probe (health +
+  generation, `completion_tokens > 0`) used by the supervisor.
+- `scripts/alert.sh` — generic webhook POST (`ALERT_WEBHOOK`), rate-limited,
+  never changes control flow on failure.
+- `scripts/memwatch-rotate.sh` — copy-truncates the memwatch log at 10 MB and
+  prunes `logs/archive/` to the newest 20 sets.
 - `files/patch_ple_layer.py`, `files/patch_modelopt_mxfp8.py`,
   `files/patch_ple_offload.py` — generators that rewrite the patched vLLM
   files from pristine `*.orig` / `orig/` copies on **every** launch. Those
@@ -911,6 +1211,22 @@ buffer or missing quant scales) — see the patch notes below.
 - `bench/mixed.py` — decode under a concurrent prefill: two streams decoding
   when a ~64k prompt arrives, reporting the p95/p99 gap between their streamed
   chunks (one per engine step, ~2.7 tokens each) inside the prefill window. sparkDash has no mode for this shape.
+- `bench/audit-spanish.py` — Spanish quality gate: long-form, multi-turn and
+  accent-heavy generations scored per paragraph for replacement characters
+  (broken byte-fallback), neighbouring-dialect markers (asturiano/gallego/
+  catalán/portugués) and incorrect-spelling forms. Exits non-zero on any
+  failure. Reads `PORT`/`SERVED_MODEL_NAME`/`API_KEY` from the environment,
+  falling back to `.env`'s `EXTRA_VLLM_ARGS --api-key`.
+- `bench/structured.py` — sparkDash-free structured (counting-stream)
+  concurrent decode bench: N streams started together, 400 completion tokens,
+  temperature 0, thinking off. Numbers are MTP's best case (~35% above prose)
+  and exist so structured-prompt numbers published elsewhere can be compared
+  like-for-like. Same env/`.env` auth as `audit-spanish.py`.
+- `bench/structured-protocol.py` — protocol-shape structured bench (the
+  structured workload over realistic request shapes).
+- `bench/verify-smoke.py` — quick speculative-decode acceptance check:
+  reads `spec_decode_num_accepted_tokens_per_pos_total` deltas from
+  `/metrics` around a few targeted generations.
 
 The published prefill and decode numbers were measured with sparkDash, driven
 by those two scripts. Both need an idle server: the counter deltas and
@@ -924,7 +1240,11 @@ sparkDash's own figures include any other traffic on the port.
   offload; tolerates multi-call `load_weights`; slices the 2560-wide IPC buffer
   to the 1440 valid bytes.
 - **ModelOpt** (`patch_modelopt_mxfp8.py`): BF16 fallback for MXFP8 shapes that
-  FlashInfer rejects.
+  FlashInfer rejects. Also, unrelated to MXFP8: bridges NVIDIA checkpoints'
+  MTP quantized_layers local-index declaration to the global index vLLM
+  queries, and dispatches ModelOpt's `FP8_PB_WO` to vLLM's native block-scaled
+  `Fp8MoEMethod` for `RoutedExperts` (no ModelOpt-native MoE method for it
+  exists) — see [NVIDIA's official checkpoint](#nvidia-s-official-checkpoint-tp1_model_id) above.
 - **PLE offload** (`patch_ple_offload.py`): GB10 has no CUDA stream memory ops
   (`CAN_USE_STREAM_MEM_OPS=0`, measured), and vLLM's offload semaphore used them
   and deadlocked after graph capture. Replaced with a host-side handshake — the
@@ -955,6 +1275,11 @@ sparkDash's own figures include any other traffic on the port.
 
 - **Qwen / Alibaba** — [Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next),
   the base model everything here derives from.
+- **NVIDIA** — [`nvidia/Qwen3.8-Flash-Next-NVFP4`](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4),
+  the official mixed-precision Model Optimizer quantization served by
+  `TP1_MODEL_ID`. Weights are unmodified NVIDIA output; the PLE-format and
+  MTP quant_algo fixes above are this repository's own compatibility work,
+  not a re-quantization.
 - **MiaAI Lab** — the single-DGX-Spark NVFP4 recipe and
   [`Mia-AiLab/Qwen3.8-Flash-Next-NVFP4`](https://huggingface.co/Mia-AiLab/Qwen3.8-Flash-Next-NVFP4).
 - **local-inference-lab** — the byte-identical Spark checkpoint used as the
@@ -966,6 +1291,13 @@ sparkDash's own figures include any other traffic on the port.
   (Apache-2.0) — the FP8-KV approach behind one patch here, reimplemented
   against this image's own sources. See
   [What is patched and why](#what-is-patched-and-why).
+- **[oscarmenendezgarcia](https://github.com/oscarmenendezgarcia)** — the
+  Spanish-extended 65k draft vocabulary (`gb10-host-adaptation` work, merged
+  with authorship preserved), the byte-level fallback pin in
+  `build_draft_vocab.py` (PR #43), the Spanish audit gate
+  (`bench/audit-spanish.py`) and the Spanish drafting write-up. See
+  [Serving Spanish](#serving-spanish-65k-draft-vocab) and the CHANGELOG
+  2026-09-14 entries.
 
 ## License
 
